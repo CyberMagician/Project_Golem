@@ -1,0 +1,10 @@
+flask
+flask-cors
+sentence-transformers
+lancedb
+wikipedia-api
+langchain-text-splitters
+umap-learn
+scikit-learn
+numpy
+torch

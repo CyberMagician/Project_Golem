@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Project Golem: Active Matrix</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #050505; font-family: 'Courier New', monospace; }
+        
+        /* UI LAYOUT */
+        #ui-layer {
+            position: absolute; top: 20px; left: 20px; width: 350px;
+            pointer-events: none; z-index: 10;
+        }
+        h1 { font-size: 14px; margin: 0; letter-spacing: 2px; text-transform: uppercase; color: #4ade80; }
+        
+        /* INPUT FIELD */
+        #input-container {
+            margin-top: 15px; pointer-events: auto;
+        }
+        input[type="text"] {
+            width: 100%; background: rgba(0,0,0,0.6); border: 1px solid #4ade80;
+            color: #4ade80; padding: 10px; font-family: 'Courier New', monospace;
+            font-size: 14px; outline: none; transition: 0.2s;
+        }
+        input[type="text"]:focus { background: rgba(74, 222, 128, 0.1); box-shadow: 0 0 10px rgba(74, 222, 128, 0.3); }
+        
+        #log { margin-top: 15px; font-size: 11px; color: #facc15; line-height: 1.4; }
+        #status { font-size: 10px; color: #64748b; margin-top: 5px; }
+
+        /* --- NEW: DATA LEGEND --- */
+        #legend-container {
+            position: absolute;
+            bottom: 20px;
+            right: 20px;
+            text-align: right;
+            pointer-events: none;
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            max-height: 80vh; /* Prevent overflow if many categories */
+            overflow-y: auto;
+        }
+        .legend-item {
+            font-size: 11px;
+            color: #94a3b8;
+            display: flex;
+            align-items: center;
+            justify-content: flex-end;
+            gap: 10px;
+            text-shadow: 0 0 2px rgba(0,0,0,0.8);
+            opacity: 0.8;
+            transition: opacity 0.2s;
+        }
+        .legend-item:hover { opacity: 1.0; }
+        .legend-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            box-shadow: 0 0 5px currentColor; /* Glowing effect */
+        }
+    </style>
+</head>
+<body>
+
+    <div id="ui-layer">
+        <h1>Project Golem // Active Retrieval</h1>
+        <div id="status">SYSTEM READY</div>
+        <div id="input-container">
+            <input type="text" id="query-input" placeholder="Query the cortex..." autocomplete="off">
+        </div>
+        <div id="log"></div>
+    </div>
+
+    <div id="legend-container"></div>
+
+    <script type="importmap">
+        { "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js", "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/" } }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+        const scene = new THREE.Scene();
+        scene.fog = new THREE.FogExp2(0x050505, 0.002);
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.1, 1000);
+        camera.position.set(0, 20, 120);
+        
+        const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+        
+        const controls = new OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true; controls.autoRotate = true; controls.autoRotateSpeed = 0.5;
+
+        let pointsMesh, geometry;
+        let nodes = [];
+
+        // --- SHADER ---
+        const material = new THREE.ShaderMaterial({
+            uniforms: { uTime: { value: 0 } },
+            vertexShader: `
+                attribute vec3 color;
+                attribute float activationTime;
+                varying vec3 vColor;
+                varying float vAlpha;
+                uniform float uTime;
+                void main() {
+                    vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+                    float timeSinceHit = uTime - activationTime;
+                    float intensity = 0.0;
+                    
+                    if (timeSinceHit > 0.0 && timeSinceHit < 3.0) {
+                        intensity = 1.0 / (1.0 + timeSinceHit * 3.0); 
+                        gl_PointSize = (4.0 * (1.0 + intensity * 5.0)) * (300.0 / -mvPosition.z);
+                    } else {
+                        gl_PointSize = 2.5 * (300.0 / -mvPosition.z);
+                    }
+                    
+                    gl_Position = projectionMatrix * mvPosition;
+                    vColor = mix(color, vec3(1.0, 1.0, 1.0), intensity);
+                    vAlpha = 0.4 + (intensity * 0.6);
+                }
+            `,
+            fragmentShader: `
+                varying vec3 vColor; varying float vAlpha;
+                void main() {
+                    vec2 coord = gl_PointCoord - vec2(0.5);
+                    if(length(coord) > 0.5) discard;
+                    float strength = 1.0 - (length(coord) * 2.0);
+                    gl_FragColor = vec4(vColor, vAlpha * strength);
+                }
+            `,
+            transparent: true, depthWrite: false, blending: THREE.AdditiveBlending
+        });
+
+        // --- LOAD DATA & BUILD LEGEND ---
+        fetch('./golem_cortex.json')
+            .then(res => res.json())
+            .then(data => {
+                nodes = data;
+                const positions = [];
+                const colors = [];
+                const activationTimes = [];
+                
+                // Map for Legend (Unique Categories)
+                const categoryMap = new Map();
+
+                data.forEach(n => {
+                    positions.push(n.pos[0]*8, n.pos[1]*8, n.pos[2]*8);
+                    colors.push(n.col[0], n.col[1], n.col[2]);
+                    activationTimes.push(-100.0);
+
+                    // Capture unique category and its color for the legend
+                    if (!categoryMap.has(n.cat)) {
+                        // Convert [0.1, 0.9, 0.1] to "rgb(25, 230, 25)"
+                        const r = Math.floor(n.col[0] * 255);
+                        const g = Math.floor(n.col[1] * 255);
+                        const b = Math.floor(n.col[2] * 255);
+                        categoryMap.set(n.cat, `rgb(${r},${g},${b})`);
+                    }
+                });
+
+                // Build Legend UI
+                const legendContainer = document.getElementById('legend-container');
+                // Sort categories alphabetically for cleanliness
+                const sortedCats = Array.from(categoryMap.entries()).sort();
+
+                sortedCats.forEach(([cat, colorStr]) => {
+                    const item = document.createElement('div');
+                    item.className = 'legend-item';
+                    item.innerHTML = `
+                        <span>${cat.toUpperCase()}</span>
+                        <div class="legend-dot" style="background-color: ${colorStr}; color: ${colorStr};"></div>
+                    `;
+                    legendContainer.appendChild(item);
+                });
+
+                geometry = new THREE.BufferGeometry();
+                geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+                geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+                geometry.setAttribute('activationTime', new THREE.Float32BufferAttribute(activationTimes, 1));
+                geometry.attributes.activationTime.setUsage(THREE.DynamicDrawUsage);
+
+                pointsMesh = new THREE.Points(geometry, material);
+                scene.add(pointsMesh);
+                
+                document.getElementById('status').innerText = `CORTEX LOADED: ${data.length} NODES`;
+            });
+
+        // --- QUERY LOGIC ---
+        const input = document.getElementById('query-input');
+        const status = document.getElementById('status');
+        const log = document.getElementById('log');
+
+        input.addEventListener('keydown', async (e) => {
+            if (e.key === 'Enter') {
+                const query = input.value;
+                status.innerText = "VECTORIZING QUERY...";
+                
+                const response = await fetch('/query', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ query: query })
+                });
+                
+                const result = await response.json();
+                status.innerText = `RETRIEVAL COMPLETE. FOUND ${result.indices.length} CONTEXTS.`;
+                
+                triggerMultiPulse(result.indices);
+                
+                if(result.indices.length > 0) {
+                    const topNode = nodes[result.indices[0]];
+                    log.innerHTML = `> Top Match: <span style="color:#fff">${topNode.title}</span><br>[${topNode.cat}]`;
+                }
+            }
+        });
+
+        function triggerMultiPulse(indices) {
+            const currentTime = performance.now() / 1000;
+            const activations = geometry.attributes.activationTime.array;
+            indices.forEach((idx, i) => {
+                activations[idx] = currentTime + (i * 0.02);
+            });
+            geometry.attributes.activationTime.needsUpdate = true;
+        }
+
+        // Animation Loop
+        function animate() {
+            requestAnimationFrame(animate);
+            controls.update();
+            material.uniforms.uTime.value = performance.now() / 1000;
+            renderer.render(scene, camera);
+        }
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+        animate();
+    </script>
+</body>
+</html>

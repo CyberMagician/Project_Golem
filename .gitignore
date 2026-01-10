@@ -1,0 +1,6 @@
+__pycache__/
+*.npy
+*.json
+my_lancedb/
+.DS_Store
+.env

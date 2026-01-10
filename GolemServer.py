@@ -1,0 +1,84 @@
+from flask import Flask, request, jsonify, send_from_directory
+from sentence_transformers import SentenceTransformer
+import numpy as np
+import json
+import torch
+import os
+import sys
+
+# --- CONFIG ---
+# Explicitly set the folder to where this script is located
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+MODEL_ID = "google/embeddinggemma-300m"
+VECTOR_FILE = "golem_vectors.npy"
+JSON_FILE = "golem_cortex.json"
+HTML_FILE = "golem_viewer.html"
+
+app = Flask(__name__, static_folder=BASE_DIR)
+
+print(f"\n🧠 PROJECT GOLEM SERVER V2")
+print(f"   📂 Serving from: {BASE_DIR}")
+
+# --- DIAGNOSTICS ---
+# Check if files exist before starting
+missing_files = []
+if not os.path.exists(os.path.join(BASE_DIR, VECTOR_FILE)):
+    missing_files.append(VECTOR_FILE)
+if not os.path.exists(os.path.join(BASE_DIR, JSON_FILE)):
+    missing_files.append(JSON_FILE)
+if not os.path.exists(os.path.join(BASE_DIR, HTML_FILE)):
+    missing_files.append(HTML_FILE)
+
+if missing_files:
+    print(f"   ❌ CRITICAL ERROR: Missing files in this folder:")
+    for f in missing_files:
+        print(f"      - {f}")
+    print("   👉 Did you run 'golem_ingest_v5.py' successfully?")
+    if VECTOR_FILE in missing_files:
+        print("   (The server cannot start without the vector matrix.)")
+        sys.exit(1)
+else:
+    print(f"   ✅ Files Verified: Memory Matrix & Cortex Map found.")
+
+# --- LOAD BRAIN ---
+device = "mps" if torch.backends.mps.is_available() else "cpu"
+print(f"   ↳ Loading Model ({device.upper()})...")
+model = SentenceTransformer(MODEL_ID, device=device, trust_remote_code=True)
+
+print("   ↳ Loading Memory Matrix...")
+memory_matrix = np.load(os.path.join(BASE_DIR, VECTOR_FILE))
+# Normalize
+norm = np.linalg.norm(memory_matrix, axis=1, keepdims=True)
+memory_matrix = memory_matrix / norm
+
+# --- ROUTES ---
+
+@app.route('/')
+def root():
+    # Force serve the specific HTML file
+    return send_from_directory(BASE_DIR, HTML_FILE)
+
+@app.route('/<path:filename>')
+def serve_static(filename):
+    return send_from_directory(BASE_DIR, filename)
+
+@app.route('/query', methods=['POST'])
+def query_brain():
+    data = request.json
+    text = data.get('query', '')
+    if not text: return jsonify({"indices": []})
+
+    print(f"🔎 Query: {text}")
+    query_vec = model.encode(["Represent this query for retrieval: " + text])[0]
+    
+    scores = np.dot(memory_matrix, query_vec)
+    top_indices = np.argsort(scores)[-50:][::-1] # increased to 50 for denser glow
+    
+    return jsonify({
+        "indices": top_indices.tolist(),
+        "scores": scores[top_indices].tolist()
+    })
+
+if __name__ == '__main__':
+    print("   ✅ SYSTEM ONLINE: http://localhost:8000")
+    app.run(port=8000)
